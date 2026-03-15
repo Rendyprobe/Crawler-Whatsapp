@@ -1,0 +1,16 @@
+# Safe example raw queries for broad Telegram group discovery in Indonesia.
+site:t.me komunitas mahasiswa telegram indonesia
+"t.me" komunitas mahasiswa indonesia
+"grup telegram" komunitas mahasiswa indonesia
+"link grup telegram" komunitas mahasiswa indonesia
+site:facebook.com "t.me" komunitas mahasiswa indonesia
+site:instagram.com "t.me" belajar javascript indonesia
+site:tiktok.com "t.me" komunitas coding indonesia
+site:x.com "t.me" komunitas startup indonesia
+site:youtube.com "t.me" komunitas data science indonesia
+site:linktr.ee "t.me" komunitas freelancer indonesia
+site:blogspot.com "t.me" mahasiswa skripsi indonesia
+site:wordpress.com "t.me" mahasiswa beasiswa indonesia
+site:medium.com "t.me" komunitas machine learning indonesia
+site:reddit.com "t.me" komunitas ui ux indonesia
+site:threads.net "t.me" komunitas product manager indonesia

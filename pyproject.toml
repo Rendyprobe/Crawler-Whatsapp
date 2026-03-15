@@ -1,0 +1,10 @@
+[project]
+name = "crawler-wa"
+version = "0.1.0"
+description = "Crawler for public WhatsApp and Telegram group links from search results."
+readme = "README.md"
+requires-python = ">=3.11"
+
+[project.scripts]
+crawler-wa = "crawler_wa:main"
+crawler-groups = "crawler_wa:main"

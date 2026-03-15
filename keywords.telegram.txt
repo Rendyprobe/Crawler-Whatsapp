@@ -1,0 +1,36 @@
+# Safe example keywords for Telegram public groups in Indonesia.
+komunitas mahasiswa
+mahasiswa teknik informatika
+mahasiswa sistem informasi
+mahasiswa skripsi
+mahasiswa beasiswa
+mahasiswa magang
+mahasiswa diskusi kampus
+mahasiswa rantau
+mahasiswa organisasi kampus
+mahasiswa cari kerja
+mahasiswa tugas akhir
+mahasiswa kkn
+belajar python
+belajar javascript
+belajar react js
+komunitas coding
+komunitas programmer indonesia
+komunitas web developer
+komunitas frontend developer
+komunitas backend developer
+komunitas mobile developer
+komunitas startup
+komunitas freelancer
+komunitas ui ux
+komunitas data science
+komunitas machine learning
+komunitas cyber security
+komunitas product manager
+komunitas digital marketing
+komunitas bisnis online
+komunitas fotografi
+komunitas anime indonesia
+komunitas game mobile
+komunitas loker indonesia
+komunitas kerja remote

@@ -1,0 +1,16 @@
+# Safe example raw queries for broad WhatsApp group discovery in Indonesia.
+site:chat.whatsapp.com komunitas coding whatsapp indonesia
+"chat.whatsapp.com" komunitas coding indonesia
+"grup whatsapp" komunitas coding indonesia
+"link grup whatsapp" komunitas coding indonesia
+site:facebook.com "chat.whatsapp.com" komunitas coding indonesia
+site:instagram.com "chat.whatsapp.com" komunitas mahasiswa indonesia
+site:tiktok.com "chat.whatsapp.com" belajar python indonesia
+site:x.com "chat.whatsapp.com" komunitas freelancer indonesia
+site:youtube.com "chat.whatsapp.com" komunitas startup indonesia
+site:linktr.ee "chat.whatsapp.com" komunitas programmer indonesia
+site:blogspot.com "chat.whatsapp.com" mahasiswa skripsi indonesia
+site:wordpress.com "chat.whatsapp.com" mahasiswa beasiswa indonesia
+site:medium.com "chat.whatsapp.com" komunitas data science indonesia
+site:reddit.com "chat.whatsapp.com" komunitas desain grafis indonesia
+site:threads.net "chat.whatsapp.com" komunitas fotografi indonesia
