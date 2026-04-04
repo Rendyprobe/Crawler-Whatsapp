@@ -14,3 +14,28 @@ site:wordpress.com "chat.whatsapp.com" mahasiswa beasiswa indonesia
 site:medium.com "chat.whatsapp.com" komunitas data science indonesia
 site:reddit.com "chat.whatsapp.com" komunitas desain grafis indonesia
 site:threads.net "chat.whatsapp.com" komunitas fotografi indonesia
+site:facebook.com "chat.whatsapp.com" umkm indonesia
+site:instagram.com "chat.whatsapp.com" owner online shop indonesia
+site:tiktok.com "chat.whatsapp.com" seller tiktok shop indonesia
+site:youtube.com "chat.whatsapp.com" affiliate tiktok indonesia
+site:linktr.ee "chat.whatsapp.com" content creator indonesia
+site:kompasiana.com "chat.whatsapp.com" bisnis online indonesia
+site:kaskus.co.id "chat.whatsapp.com" reseller indonesia
+site:kumparan.com "chat.whatsapp.com" dropshipper indonesia
+site:idntimes.com "chat.whatsapp.com" digital marketing indonesia
+site:blog.ub.ac.id "chat.whatsapp.com" komunitas guru indonesia
+site:kemahasiswaan.ugm.ac.id "chat.whatsapp.com" owner bisnis online indonesia
+site:facebook.com "chat.whatsapp.com" komunitas hr indonesia
+site:instagram.com "chat.whatsapp.com" komunitas recruiter indonesia
+site:tiktok.com "chat.whatsapp.com" komunitas sales marketing indonesia
+site:youtube.com "chat.whatsapp.com" komunitas seo indonesia
+site:linktr.ee "chat.whatsapp.com" komunitas facebook ads indonesia
+site:kompasiana.com "chat.whatsapp.com" komunitas google ads indonesia
+site:kaskus.co.id "chat.whatsapp.com" komunitas admin toko online indonesia
+site:kumparan.com "chat.whatsapp.com" komunitas akuntansi umkm indonesia
+site:facebook.com "chat.whatsapp.com" agen properti indonesia
+site:instagram.com "chat.whatsapp.com" agen asuransi indonesia
+site:tiktok.com "chat.whatsapp.com" wedding organizer indonesia
+site:youtube.com "chat.whatsapp.com" salon kecantikan indonesia
+site:linktr.ee "chat.whatsapp.com" personal trainer indonesia
+site:blogspot.com "chat.whatsapp.com" virtual assistant indonesia

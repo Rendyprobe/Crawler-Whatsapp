@@ -1,5 +1,5 @@
 const SHEET_NAME = 'Grup';
-const HEADERS = ['timestamp', 'platform', 'group_name', 'url', 'status'];
+const HEADERS = ['timestamp', 'platform', 'group_name', 'url', 'status', 'member_count'];
 
 function doPost(e) {
   try {
@@ -72,6 +72,9 @@ function appendUniqueRows_(sheet, rows) {
       String(row.group_name || ''),
       url,
       String(row.status || 'active'),
+      row.member_count === '' || row.member_count === null || row.member_count === undefined
+        ? ''
+        : Number(row.member_count),
     ]);
   });
 

@@ -5,6 +5,11 @@ CLI Python untuk mencari link grup publik WhatsApp atau Telegram dari hasil penc
 Perilaku default saat ini:
 - platform dipilih lewat `--platform whatsapp` atau `--platform telegram`
 - keyword akan diperluas ke banyak query discovery publik dalam mode `wide`
+- provider default difokuskan ke `duckduckgo`, `yahoo`, `aol`, dan `brave`
+- grup aktif difilter minimum `50` anggota jika jumlah anggota bisa dibaca dari metadata
+- crawler mengikuti sampai `2` hop tambahan dari halaman hasil untuk menangkap link grup yang tersembunyi di halaman lanjutan
+- hasil validasi disimpan ke cache SQLite selama `72` jam agar link yang sama tidak dicek ulang setiap run
+- ada budget fetch global default `200` halaman target per run agar discovery agresif tetap terkontrol
 - hasil yang dikirim ke sheet hanya grup dengan status `active`
 - sink default adalah Google Sheets, bukan file lokal
 - file lokal hanya dibuat jika `--output` diisi
@@ -67,6 +72,31 @@ python3 crawler_wa.py \
   --max-active-groups 10
 ```
 
+Optimasi discovery yang lebih agresif:
+
+```bash
+python3 crawler_wa.py \
+  --platform telegram \
+  --keyword-file keywords.telegram.txt \
+  --max-active-groups 20 \
+  --min-member-count 50 \
+  --follow-hops 2 \
+  --max-follow-pages 3 \
+  --max-fetch-budget 200 \
+  --max-query-workers 8 \
+  --max-validation-workers 8
+```
+
+Atur cache validasi:
+
+```bash
+python3 crawler_wa.py \
+  --platform telegram \
+  --keyword-file keywords.telegram.txt \
+  --cache-db crawler_cache.sqlite3 \
+  --cache-ttl-hours 72
+```
+
 Simpan juga ke file lokal:
 
 ```bash
@@ -111,6 +141,14 @@ Opsi yang paling sering dipakai:
 - `--discovery-mode`: `focused` untuk query sempit, `wide` untuk discovery lebar ke sosial media dan website publik
 - `--source-domain`: tambahkan domain sumber discovery publik, misalnya `facebook.com`, `forumkampus.id`, atau `kompasiana.com`
 - `--max-active-groups`: hentikan proses setelah jumlah grup aktif tercapai
+- `--min-member-count`: filter minimum jumlah anggota grup aktif, default `50`
+- `--follow-hops`: jumlah hop lanjutan dari halaman hasil, default `2`
+- `--max-follow-pages`: jumlah halaman lanjutan maksimum dari tiap halaman hasil
+- `--max-fetch-budget`: batas total fetch halaman hasil lanjutan per run, default `200`
+- `--max-validation-workers`: jumlah worker paralel untuk validasi grup aktif
+- `--cache-db`: path file cache SQLite untuk status validasi link
+- `--cache-ttl-hours`: umur maksimum cache validasi sebelum dicek ulang
+- `--no-cache`: matikan cache SQLite
 - `--output`: simpan hasil aktif ke file lokal
 - `--no-sheet-sync`: matikan pengiriman default ke sheet
 - `--allow-global-groups`: matikan filter grup Indonesia

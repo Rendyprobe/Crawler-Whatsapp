@@ -14,3 +14,28 @@ site:wordpress.com "t.me" mahasiswa beasiswa indonesia
 site:medium.com "t.me" komunitas machine learning indonesia
 site:reddit.com "t.me" komunitas ui ux indonesia
 site:threads.net "t.me" komunitas product manager indonesia
+site:facebook.com "t.me" umkm indonesia
+site:instagram.com "t.me" owner online shop indonesia
+site:tiktok.com "t.me" seller tiktok shop indonesia
+site:youtube.com "t.me" affiliate tiktok indonesia
+site:linktr.ee "t.me" content creator indonesia
+site:kompasiana.com "t.me" bisnis online indonesia
+site:kaskus.co.id "t.me" reseller indonesia
+site:kumparan.com "t.me" dropshipper indonesia
+site:idntimes.com "t.me" digital marketing indonesia
+site:blog.ub.ac.id "t.me" komunitas guru indonesia
+site:kemahasiswaan.ugm.ac.id "t.me" owner bisnis online indonesia
+site:facebook.com "t.me" komunitas hr indonesia
+site:instagram.com "t.me" komunitas recruiter indonesia
+site:tiktok.com "t.me" komunitas sales marketing indonesia
+site:youtube.com "t.me" komunitas seo indonesia
+site:linktr.ee "t.me" komunitas facebook ads indonesia
+site:kompasiana.com "t.me" komunitas google ads indonesia
+site:kaskus.co.id "t.me" komunitas admin toko online indonesia
+site:kumparan.com "t.me" komunitas akuntansi umkm indonesia
+site:facebook.com "t.me" agen properti indonesia
+site:instagram.com "t.me" agen asuransi indonesia
+site:tiktok.com "t.me" wedding organizer indonesia
+site:youtube.com "t.me" salon kecantikan indonesia
+site:linktr.ee "t.me" personal trainer indonesia
+site:blogspot.com "t.me" virtual assistant indonesia

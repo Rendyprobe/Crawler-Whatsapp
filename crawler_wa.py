@@ -4,6 +4,7 @@ import argparse
 import html
 import json
 import re
+import sqlite3
 import ssl
 import sys
 import threading
@@ -11,6 +12,7 @@ import time
 import unicodedata
 import urllib.parse
 import urllib.request
+from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -41,8 +43,16 @@ ANCHOR_HREF_PATTERN = re.compile(r'<a\b[^>]+href=["\']([^"\']+)["\']', re.IGNORE
 SITE_OPERATOR_PATTERN = re.compile(r"\bsite:[^\s]+\b", re.IGNORECASE)
 REDIRECT_WRAPPER_PATTERN = re.compile(r"/RU=([^/]+)/RK=", re.IGNORECASE)
 SUPPORTED_PROVIDERS = ("duckduckgo", "brave", "yahoo", "aol", "google")
+DEFAULT_ENABLED_PROVIDERS = ("duckduckgo", "yahoo", "aol", "brave")
 SUPPORTED_PLATFORMS = ("whatsapp", "telegram")
 SUPPORTED_DISCOVERY_MODES = ("focused", "wide")
+DEFAULT_MAX_QUERY_WORKERS = 8
+DEFAULT_MAX_VALIDATION_WORKERS = 8
+DEFAULT_FOLLOW_HOPS = 2
+DEFAULT_MAX_FOLLOW_PAGES = 3
+DEFAULT_MAX_FETCH_BUDGET = 200
+DEFAULT_CACHE_DB_PATH = Path("crawler_cache.sqlite3")
+DEFAULT_CACHE_TTL_HOURS = 72.0
 PLATFORM_QUERY_TEMPLATES = {
     "whatsapp": "site:chat.whatsapp.com {keyword} whatsapp indonesia",
     "telegram": "site:t.me {keyword} telegram indonesia",
@@ -64,6 +74,9 @@ PLATFORM_DISCOVERY_CONFIG = {
     },
 }
 DEFAULT_DISCOVERY_SOURCE_DOMAINS = (
+    "ac.id",
+    "or.id",
+    "sch.id",
     "facebook.com",
     "instagram.com",
     "tiktok.com",
@@ -80,6 +93,20 @@ DEFAULT_DISCOVERY_SOURCE_DOMAINS = (
     "wordpress.com",
     "medium.com",
     "notion.site",
+    "kaskus.co.id",
+    "kompasiana.com",
+    "kumparan.com",
+    "idntimes.com",
+    "hipwee.com",
+    "youngontop.com",
+    "student-activity.binus.ac.id",
+    "blog.ub.ac.id",
+    "blog.ui.ac.id",
+    "blog.unesa.ac.id",
+    "blog.unnes.ac.id",
+    "kemahasiswaan.ugm.ac.id",
+    "kemahasiswaan.itb.ac.id",
+    "kemahasiswaan.unair.ac.id",
 )
 DEFAULT_SHEET_WEBHOOK_URL = (
     "https://script.google.com/macros/s/"
@@ -220,6 +247,57 @@ SEARCH_PROVIDER_EXCLUDED_HOSTS = {
     "yahoo": ("yahoo.com", "yimg.com", "aol.com", "oath.com"),
     "aol": ("aol.com", "yahoo.com", "yimg.com", "oath.com", "mapquest.com"),
 }
+FOLLOW_LINK_HINTS = {
+    "whatsapp": (
+        "chat.whatsapp.com",
+        "whatsapp",
+        "wa.me",
+        "join",
+        "grup",
+        "group",
+        "komunitas",
+        "mahasiswa",
+        "forum",
+        "blog",
+        "directory",
+        "direktori",
+    ),
+    "telegram": (
+        "t.me",
+        "telegram",
+        "join",
+        "grup",
+        "group",
+        "komunitas",
+        "mahasiswa",
+        "forum",
+        "blog",
+        "directory",
+        "direktori",
+        "channel",
+    ),
+}
+SKIPPED_FOLLOW_EXTENSIONS = (
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".svg",
+    ".webp",
+    ".pdf",
+    ".zip",
+    ".rar",
+    ".7z",
+    ".mp4",
+    ".mp3",
+    ".avi",
+    ".mov",
+    ".webm",
+    ".css",
+    ".js",
+    ".json",
+    ".xml",
+)
 
 
 @dataclass(frozen=True)
@@ -228,11 +306,120 @@ class GroupCheckResult:
     url: str
     status: str
     group_name: str | None = None
+    member_count: int | None = None
     reason: str | None = None
 
 
 class ProviderTemporarilyDisabledError(RuntimeError):
     pass
+
+
+class FetchBudget:
+    def __init__(self, max_requests: int | None) -> None:
+        self.max_requests = max_requests if max_requests and max_requests > 0 else None
+        self.used_requests = 0
+        self._lock = threading.Lock()
+
+    def try_acquire(self, count: int = 1) -> bool:
+        if self.max_requests is None:
+            return True
+        with self._lock:
+            if self.used_requests + count > self.max_requests:
+                return False
+            self.used_requests += count
+            return True
+
+    def remaining(self) -> int | None:
+        if self.max_requests is None:
+            return None
+        with self._lock:
+            return max(0, self.max_requests - self.used_requests)
+
+
+class ValidationCache:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS validation_cache (
+                    platform TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    group_name TEXT,
+                    member_count INTEGER,
+                    reason TEXT,
+                    checked_at TEXT NOT NULL,
+                    PRIMARY KEY (platform, url)
+                )
+                """
+            )
+            self._conn.commit()
+
+    def get(self, platform: str, url: str, ttl_hours: float | None) -> GroupCheckResult | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT platform, url, status, group_name, member_count, reason, checked_at
+                FROM validation_cache
+                WHERE platform = ? AND url = ?
+                """,
+                (platform, url),
+            ).fetchone()
+        if row is None:
+            return None
+        if ttl_hours and ttl_hours > 0:
+            try:
+                checked_at = datetime.fromisoformat(str(row["checked_at"]))
+            except ValueError:
+                return None
+            age_seconds = (datetime.now(timezone.utc) - checked_at).total_seconds()
+            if age_seconds > ttl_hours * 3600:
+                return None
+        return GroupCheckResult(
+            platform=str(row["platform"]),
+            url=str(row["url"]),
+            status=str(row["status"]),
+            group_name=str(row["group_name"]) if row["group_name"] is not None else None,
+            member_count=int(row["member_count"]) if row["member_count"] is not None else None,
+            reason=str(row["reason"]) if row["reason"] is not None else None,
+        )
+
+    def put(self, result: GroupCheckResult) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO validation_cache (
+                    platform, url, status, group_name, member_count, reason, checked_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(platform, url) DO UPDATE SET
+                    status = excluded.status,
+                    group_name = excluded.group_name,
+                    member_count = excluded.member_count,
+                    reason = excluded.reason,
+                    checked_at = excluded.checked_at
+                """,
+                (
+                    result.platform,
+                    result.url,
+                    result.status,
+                    result.group_name,
+                    result.member_count,
+                    result.reason,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._conn.commit()
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
 
 
 def normalize_title_text(text: str) -> str:
@@ -603,6 +790,106 @@ def normalize_source_domain(value: str) -> str | None:
     return host
 
 
+def resolve_discovery_source_domains(extra_domains: Iterable[str] | None = None) -> tuple[str, ...]:
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for domain in list(DEFAULT_DISCOVERY_SOURCE_DOMAINS) + list(extra_domains or []):
+        normalized = normalize_source_domain(domain)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        resolved.append(normalized)
+    return tuple(resolved)
+
+
+def parse_member_count_token(value: str) -> int | None:
+    raw_token = value.strip().lower()
+    token = re.sub(r"\s+", "", raw_token).replace(",", ".")
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([km]?)", token)
+    if not match:
+        digits = re.sub(r"\D", "", raw_token)
+        return int(digits) if digits else None
+    suffix = match.group(2)
+    if not suffix:
+        digits = re.sub(r"\D", "", raw_token)
+        return int(digits) if digits else None
+    number = float(match.group(1))
+    if suffix == "k":
+        number *= 1_000
+    elif suffix == "m":
+        number *= 1_000_000
+    return int(number)
+
+
+def extract_member_count_from_text(text: str, labels: tuple[str, ...]) -> int | None:
+    lowered_labels = "|".join(re.escape(label) for label in labels)
+    pattern = re.compile(
+        rf"(\d[\d\s.,]*\d|\d+(?:[.,]\d+)?\s*[km]?)\s*(?:{lowered_labels})\b",
+        re.IGNORECASE,
+    )
+    match = pattern.search(text)
+    if not match:
+        return None
+    return parse_member_count_token(match.group(1))
+
+
+def is_http_url(value: str) -> bool:
+    return value.startswith(("http://", "https://"))
+
+
+def normalize_follow_target(raw_href: str, base_url: str) -> str | None:
+    href = html.unescape(raw_href).strip()
+    if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+        return None
+    target = urllib.parse.urljoin(base_url, href)
+    target, _ = urllib.parse.urldefrag(target)
+    parsed = urllib.parse.urlparse(target)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    lowered_path = parsed.path.lower()
+    if lowered_path.endswith(SKIPPED_FOLLOW_EXTENSIONS):
+        return None
+    return target
+
+
+def score_follow_target(target_url: str, base_url: str, platform: str) -> int:
+    target_parsed = urllib.parse.urlparse(target_url)
+    base_parsed = urllib.parse.urlparse(base_url)
+    target_host = target_parsed.netloc.lower()
+    base_host = base_parsed.netloc.lower()
+    combined = f"{target_host}{target_parsed.path.lower()}?{target_parsed.query.lower()}"
+    score = 0
+    if target_host == base_host:
+        score += 4
+    elif target_host.endswith(f".{base_host}") or base_host.endswith(f".{target_host}"):
+        score += 3
+    if target_host.endswith((".id", ".ac.id", ".or.id", ".sch.id", ".co.id")):
+        score += 2
+    if any(hint in combined for hint in FOLLOW_LINK_HINTS[platform]):
+        score += 3
+    if normalize_group_url(target_url, platform):
+        score += 10
+    return score
+
+
+def extract_follow_targets(page_html: str, base_url: str, platform: str) -> list[str]:
+    ranked: list[tuple[int, int, str]] = []
+    seen: set[str] = set()
+    for index, href in enumerate(ANCHOR_HREF_PATTERN.findall(page_html)):
+        target = normalize_follow_target(href, base_url)
+        if not target or target in seen or target == base_url:
+            continue
+        if normalize_group_url(target, platform):
+            continue
+        seen.add(target)
+        score = score_follow_target(target, base_url, platform)
+        if score <= 0:
+            continue
+        ranked.append((score, index, target))
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    return [target for _, _, target in ranked]
+
+
 def build_keyword_discovery_queries(
     keyword: str,
     platform: str,
@@ -615,15 +902,7 @@ def build_keyword_discovery_queries(
         return [base_query]
 
     config = PLATFORM_DISCOVERY_CONFIG[platform]
-    domains = source_domains or DEFAULT_DISCOVERY_SOURCE_DOMAINS
-    normalized_domains: list[str] = []
-    seen_domains: set[str] = set()
-    for domain in domains:
-        normalized = normalize_source_domain(domain)
-        if not normalized or normalized in seen_domains:
-            continue
-        seen_domains.add(normalized)
-        normalized_domains.append(normalized)
+    normalized_domains = list(resolve_discovery_source_domains(source_domains))
 
     queries = [
         base_query,
@@ -850,6 +1129,48 @@ def fetch_search_body(
         return body
 
 
+def collect_group_links_from_page(
+    page_url: str,
+    page_html: str,
+    platform: str,
+    timeout: float,
+    delay_seconds: float,
+    max_follow_hops: int,
+    max_follow_pages: int,
+    visited_pages: set[str],
+    fetch_budget: FetchBudget | None = None,
+) -> list[tuple[str, int]]:
+    found: list[tuple[str, int]] = []
+    seen_links: set[str] = set()
+    queue: deque[tuple[str, str, int]] = deque([(page_url, page_html, 0)])
+    followed_pages = 0
+
+    while queue:
+        current_url, current_html, depth = queue.popleft()
+        for link in extract_group_links(current_html, platform):
+            if link in seen_links:
+                continue
+            seen_links.add(link)
+            found.append((link, depth))
+        if depth >= max_follow_hops:
+            continue
+        for target in extract_follow_targets(current_html, current_url, platform):
+            if followed_pages >= max_follow_pages:
+                break
+            if target in visited_pages:
+                continue
+            if fetch_budget and not fetch_budget.try_acquire():
+                break
+            visited_pages.add(target)
+            followed_pages += 1
+            try:
+                target_html = fetch_text(target, timeout=timeout, delay_seconds=delay_seconds)
+            except Exception:
+                continue
+            queue.append((target, target_html, depth + 1))
+    return found
+
+
 def search_query_with_provider(
     platform: str,
     provider: str,
@@ -858,12 +1179,23 @@ def search_query_with_provider(
     delay_seconds: float,
     max_search_pages: int,
     max_result_pages: int,
+    max_follow_hops: int,
+    max_follow_pages: int,
+    fetch_budget: FetchBudget | None = None,
 ) -> list[str]:
-    candidates: list[str] = []
-    seen_invites: set[str] = set()
+    candidate_scores: dict[str, int] = {}
+    candidate_order: dict[str, int] = {}
     seen_targets: set[str] = set()
     visited_targets = 0
     provider_query = adapt_query_for_provider(provider, query)
+    order_counter = 0
+
+    def add_candidate(link: str, weight: int) -> None:
+        nonlocal order_counter
+        if link not in candidate_order:
+            candidate_order[link] = order_counter
+            order_counter += 1
+        candidate_scores[link] = candidate_scores.get(link, 0) + weight
 
     for search_page_index in range(max_search_pages):
         if is_provider_disabled(provider):
@@ -886,9 +1218,7 @@ def search_query_with_provider(
             continue
 
         for link in extract_group_links(search_body, platform):
-            if link not in seen_invites:
-                seen_invites.add(link)
-                candidates.append(link)
+            add_candidate(link, 6)
 
         targets = extract_provider_targets(provider, search_body)
         for target in targets:
@@ -896,18 +1226,32 @@ def search_query_with_provider(
                 break
             if target in seen_targets:
                 continue
+            if fetch_budget and not fetch_budget.try_acquire():
+                break
             seen_targets.add(target)
             visited_targets += 1
             try:
                 page_html = fetch_text(target, timeout=timeout, delay_seconds=delay_seconds)
             except Exception:
                 continue
-            for link in extract_group_links(page_html, platform):
-                if link not in seen_invites:
-                    seen_invites.add(link)
-                    candidates.append(link)
+            for link, depth in collect_group_links_from_page(
+                target,
+                page_html,
+                platform,
+                timeout=timeout,
+                delay_seconds=delay_seconds,
+                max_follow_hops=max_follow_hops,
+                max_follow_pages=max_follow_pages,
+                visited_pages=seen_targets,
+                fetch_budget=fetch_budget,
+            ):
+                add_candidate(link, 4 if depth == 0 else 2)
 
-    return candidates
+    ranked_candidates = sorted(
+        candidate_scores,
+        key=lambda link: (-candidate_scores[link], candidate_order[link]),
+    )
+    return ranked_candidates
 
 
 def search_query(
@@ -917,6 +1261,9 @@ def search_query(
     delay_seconds: float,
     max_search_pages: int,
     max_result_pages: int,
+    max_follow_hops: int,
+    max_follow_pages: int,
+    fetch_budget: FetchBudget | None,
     providers: list[str],
 ) -> dict[str, list[str]]:
     results: dict[str, list[str]] = {}
@@ -932,6 +1279,9 @@ def search_query(
                 delay_seconds,
                 max_search_pages,
                 max_result_pages,
+                max_follow_hops,
+                max_follow_pages,
+                fetch_budget,
             ): provider
             for provider in providers
         }
@@ -955,6 +1305,9 @@ def search_queries_concurrently(
     delay_seconds: float,
     max_search_pages: int,
     max_result_pages: int,
+    max_follow_hops: int,
+    max_follow_pages: int,
+    fetch_budget: FetchBudget | None,
     providers: list[str],
     max_query_workers: int | None,
 ) -> dict[str, dict[str, list[str]]]:
@@ -974,6 +1327,9 @@ def search_queries_concurrently(
                 delay_seconds,
                 max_search_pages,
                 max_result_pages,
+                max_follow_hops,
+                max_follow_pages,
+                fetch_budget,
                 providers,
             ): query
             for query in queries
@@ -1006,6 +1362,21 @@ def extract_telegram_page_extra(text: str) -> str:
     return html.unescape(match.group(1)).strip()
 
 
+def extract_whatsapp_member_count(page_html: str) -> int | None:
+    description = extract_meta_property(page_html, "og:description")
+    return (
+        extract_member_count_from_text(description, ("participant", "participants", "member", "members"))
+        or extract_member_count_from_text(page_html, ("participant", "participants", "member", "members"))
+    )
+
+
+def extract_telegram_member_count(description: str, extra: str) -> int | None:
+    return (
+        extract_member_count_from_text(extra, ("member", "members"))
+        or extract_member_count_from_text(description, ("member", "members"))
+    )
+
+
 def validate_whatsapp_link(url: str, timeout: float, delay_seconds: float) -> GroupCheckResult:
     normalized = normalize_whatsapp_url(url)
     if not normalized:
@@ -1028,17 +1399,20 @@ def validate_whatsapp_link(url: str, timeout: float, delay_seconds: float) -> Gr
         )
 
     group_name = extract_meta_property(page, "og:title")
+    member_count = extract_whatsapp_member_count(page)
     if group_name:
         return GroupCheckResult(
             platform="whatsapp",
             url=normalized,
             status="active",
             group_name=group_name,
+            member_count=member_count,
         )
     return GroupCheckResult(
         platform="whatsapp",
         url=normalized,
         status="inactive",
+        member_count=member_count,
         reason="metadata grup kosong",
     )
 
@@ -1076,6 +1450,7 @@ def validate_telegram_link(url: str, timeout: float, delay_seconds: float) -> Gr
     group_name = extract_meta_property(page, "og:title")
     description = extract_meta_property(page, "og:description")
     extra = extract_telegram_page_extra(page)
+    member_count = extract_telegram_member_count(description, extra)
     generic_titles = {
         "Telegram – a new era of messaging",
         "Telegram Messenger",
@@ -1093,6 +1468,7 @@ def validate_telegram_link(url: str, timeout: float, delay_seconds: float) -> Gr
             platform="telegram",
             url=normalized,
             status="inactive",
+            member_count=member_count,
             reason="tautan Telegram ini channel, bukan grup",
         )
     if re.search(r"\bmember(?:s)?\b", extra, re.IGNORECASE):
@@ -1101,6 +1477,7 @@ def validate_telegram_link(url: str, timeout: float, delay_seconds: float) -> Gr
             url=normalized,
             status="active",
             group_name=group_name,
+            member_count=member_count,
         )
     if description and "group" in description.lower():
         return GroupCheckResult(
@@ -1108,11 +1485,13 @@ def validate_telegram_link(url: str, timeout: float, delay_seconds: float) -> Gr
             url=normalized,
             status="active",
             group_name=group_name,
+            member_count=member_count,
         )
     return GroupCheckResult(
         platform="telegram",
         url=normalized,
         status="inactive",
+        member_count=member_count,
         reason="halaman Telegram aktif tetapi tidak terdeteksi sebagai grup",
     )
 
@@ -1127,8 +1506,57 @@ def apply_indonesia_group_filter(result: GroupCheckResult, indonesia_only: bool)
         url=result.url,
         status="filtered",
         group_name=result.group_name,
+        member_count=result.member_count,
         reason="nama grup tidak terindikasi Indonesia atau terdeteksi non-Indonesia",
     )
+
+
+def apply_member_count_filter(result: GroupCheckResult, min_member_count: int | None) -> GroupCheckResult:
+    if min_member_count is None or result.status != "active":
+        return result
+    if result.member_count is None:
+        return GroupCheckResult(
+            platform=result.platform,
+            url=result.url,
+            status="filtered",
+            group_name=result.group_name,
+            member_count=result.member_count,
+            reason=f"jumlah anggota tidak tersedia untuk filter minimum {min_member_count}",
+        )
+    if result.member_count >= min_member_count:
+        return result
+    return GroupCheckResult(
+        platform=result.platform,
+        url=result.url,
+        status="filtered",
+        group_name=result.group_name,
+        member_count=result.member_count,
+        reason=f"jumlah anggota {result.member_count} di bawah minimum {min_member_count}",
+    )
+
+
+def validate_group_link_raw(
+    url: str,
+    platform: str,
+    timeout: float,
+    delay_seconds: float,
+    cache: ValidationCache | None = None,
+    cache_ttl_hours: float | None = None,
+) -> GroupCheckResult:
+    cache_key = normalize_group_url(url, platform) or url.strip()
+    if cache:
+        cached = cache.get(platform, cache_key, cache_ttl_hours)
+        if cached is not None:
+            return cached
+    if platform == "whatsapp":
+        result = validate_whatsapp_link(url, timeout, delay_seconds)
+    elif platform == "telegram":
+        result = validate_telegram_link(url, timeout, delay_seconds)
+    else:
+        raise ValueError(f"platform tidak didukung: {platform}")
+    if cache:
+        cache.put(result)
+    return result
 
 
 def validate_group_link(
@@ -1137,14 +1565,20 @@ def validate_group_link(
     timeout: float,
     delay_seconds: float,
     indonesia_only: bool = True,
+    min_member_count: int | None = None,
+    cache: ValidationCache | None = None,
+    cache_ttl_hours: float | None = None,
 ) -> GroupCheckResult:
-    if platform == "whatsapp":
-        result = validate_whatsapp_link(url, timeout, delay_seconds)
-        return apply_indonesia_group_filter(result, indonesia_only)
-    if platform == "telegram":
-        result = validate_telegram_link(url, timeout, delay_seconds)
-        return apply_indonesia_group_filter(result, indonesia_only)
-    raise ValueError(f"platform tidak didukung: {platform}")
+    result = validate_group_link_raw(
+        url,
+        platform,
+        timeout,
+        delay_seconds,
+        cache=cache,
+        cache_ttl_hours=cache_ttl_hours,
+    )
+    result = apply_indonesia_group_filter(result, indonesia_only)
+    return apply_member_count_filter(result, min_member_count)
 
 
 def validate_invite(url: str, timeout: float, delay_seconds: float) -> GroupCheckResult:
@@ -1208,6 +1642,7 @@ def build_sheet_rows(results: list[GroupCheckResult]) -> list[dict[str, str]]:
                 "group_name": result.group_name or "",
                 "url": result.url,
                 "status": result.status,
+                "member_count": result.member_count if result.member_count is not None else "",
             }
         )
     return rows
@@ -1227,8 +1662,64 @@ def sync_rows_to_sheet(sheet_webhook_url: str, rows: list[dict[str, str]], timeo
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        response.read()
+        charset = response.headers.get_content_charset() or "utf-8"
+        response_body = response.read().decode(charset, "ignore")
+    if not response_body.strip():
+        return len(rows)
+    try:
+        parsed = json.loads(response_body)
+    except json.JSONDecodeError:
+        return len(rows)
+    if isinstance(parsed, dict) and parsed.get("ok") is False:
+        raise RuntimeError(str(parsed.get("error") or "sheet sync gagal"))
+    if isinstance(parsed, dict) and isinstance(parsed.get("inserted"), int):
+        return parsed["inserted"]
     return len(rows)
+
+
+def validate_links_batch(
+    links: list[str],
+    platform: str,
+    timeout: float,
+    delay_seconds: float,
+    indonesia_only: bool,
+    min_member_count: int | None,
+    max_workers: int,
+    cache: ValidationCache | None = None,
+    cache_ttl_hours: float | None = None,
+) -> list[GroupCheckResult]:
+    if not links:
+        return []
+    results: list[GroupCheckResult | None] = [None] * len(links)
+    worker_count = max(1, min(max_workers, len(links)))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_to_index = {
+            executor.submit(
+                validate_group_link,
+                link,
+                platform,
+                timeout,
+                delay_seconds,
+                indonesia_only,
+                min_member_count,
+                cache,
+                cache_ttl_hours,
+            ): index
+            for index, link in enumerate(links)
+        }
+        for future in as_completed(future_to_index):
+            index = future_to_index[future]
+            link = links[index]
+            try:
+                results[index] = future.result()
+            except Exception as exc:
+                results[index] = GroupCheckResult(
+                    platform=platform,
+                    url=link,
+                    status="error",
+                    reason=str(exc),
+                )
+    return [result for result in results if result is not None]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1309,7 +1800,31 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-query-workers",
         type=int,
-        help="Jumlah worker paralel untuk query/keyword. Default: semua query jalan bersamaan.",
+        help=f"Jumlah worker paralel untuk query/keyword. Default dibatasi sampai {DEFAULT_MAX_QUERY_WORKERS}.",
+    )
+    parser.add_argument(
+        "--max-validation-workers",
+        type=int,
+        default=DEFAULT_MAX_VALIDATION_WORKERS,
+        help=f"Jumlah worker paralel untuk validasi grup. Default: {DEFAULT_MAX_VALIDATION_WORKERS}.",
+    )
+    parser.add_argument(
+        "--follow-hops",
+        type=int,
+        default=DEFAULT_FOLLOW_HOPS,
+        help=f"Jumlah hop tambahan dari halaman hasil. Default: {DEFAULT_FOLLOW_HOPS}.",
+    )
+    parser.add_argument(
+        "--max-follow-pages",
+        type=int,
+        default=DEFAULT_MAX_FOLLOW_PAGES,
+        help=f"Maksimal halaman lanjutan yang diikuti dari tiap halaman hasil. Default: {DEFAULT_MAX_FOLLOW_PAGES}.",
+    )
+    parser.add_argument(
+        "--max-fetch-budget",
+        type=int,
+        default=DEFAULT_MAX_FETCH_BUDGET,
+        help=f"Budget total fetch halaman target dan hop lanjutan per run. Default: {DEFAULT_MAX_FETCH_BUDGET}. Gunakan 0 untuk tanpa batas.",
     )
     parser.add_argument(
         "--sheet-webhook-url",
@@ -1327,9 +1842,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Berhenti setelah menemukan sejumlah grup aktif sesuai angka ini.",
     )
     parser.add_argument(
+        "--min-member-count",
+        type=int,
+        default=50,
+        help="Filter minimum jumlah anggota grup aktif. Gunakan 0 untuk mematikan filter. Default: 50.",
+    )
+    parser.add_argument(
         "--allow-global-groups",
         action="store_true",
         help="Matikan filter Indonesia-only pada nama grup.",
+    )
+    parser.add_argument(
+        "--cache-db",
+        type=Path,
+        default=DEFAULT_CACHE_DB_PATH,
+        help=f"Path file SQLite cache validasi. Default: {DEFAULT_CACHE_DB_PATH}.",
+    )
+    parser.add_argument(
+        "--cache-ttl-hours",
+        type=float,
+        default=DEFAULT_CACHE_TTL_HOURS,
+        help=f"Maksimum umur cache validasi dalam jam. Default: {DEFAULT_CACHE_TTL_HOURS}.",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Matikan cache SQLite validasi lintas run.",
     )
     return parser
 
@@ -1340,126 +1878,166 @@ def main(argv: list[str] | None = None) -> int:
     output_path = args.output
     sheet_webhook_url = None if args.no_sheet_sync else args.sheet_webhook_url
     indonesia_only = not args.allow_global_groups
+    min_member_count = args.min_member_count if args.min_member_count and args.min_member_count > 0 else None
+    resolved_source_domains = resolve_discovery_source_domains(args.source_domain)
+    max_validation_workers = max(1, args.max_validation_workers)
+    follow_hops = max(0, args.follow_hops)
+    max_follow_pages = max(0, args.max_follow_pages)
+    fetch_budget = FetchBudget(args.max_fetch_budget)
+    cache = None if args.no_cache else ValidationCache(args.cache_db)
 
     try:
-        queries = load_queries(
-            args.platform,
-            args.query_file,
-            args.query,
-            args.keyword_file,
-            args.keyword,
-            discovery_mode=args.discovery_mode,
-            source_domains=args.source_domain,
+        try:
+            queries = load_queries(
+                args.platform,
+                args.query_file,
+                args.query,
+                args.keyword_file,
+                args.keyword,
+                discovery_mode=args.discovery_mode,
+                source_domains=resolved_source_domains,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        if not queries:
+            parser.error("Tidak ada query. Gunakan --query-file, --query, --keyword-file, atau --keyword.")
+        if not output_path and not sheet_webhook_url:
+            parser.error("Tidak ada sink hasil. Gunakan --output atau aktifkan sheet sync.")
+        providers = args.provider or list(DEFAULT_ENABLED_PROVIDERS)
+        existing_links = load_saved_links(output_path, args.platform) if output_path else []
+        existing_link_set = set(existing_links)
+        max_query_workers = max(1, args.max_query_workers or min(len(queries), DEFAULT_MAX_QUERY_WORKERS))
+        reset_provider_runtime_state()
+
+        print(
+            f"[info] platform: {args.platform}"
         )
-    except ValueError as exc:
-        parser.error(str(exc))
-    if not queries:
-        parser.error("Tidak ada query. Gunakan --query-file, --query, --keyword-file, atau --keyword.")
-    if not output_path and not sheet_webhook_url:
-        parser.error("Tidak ada sink hasil. Gunakan --output atau aktifkan sheet sync.")
-    providers = args.provider or list(SUPPORTED_PROVIDERS)
-    existing_links = load_saved_links(output_path, args.platform) if output_path else []
-    existing_link_set = set(existing_links)
-    max_query_workers = args.max_query_workers or len(queries)
-    reset_provider_runtime_state()
-
-    print(
-        f"[info] platform: {args.platform}"
-    )
-    print(f"[info] mode discovery keyword: {args.discovery_mode}")
-    print(f"[info] filter Indonesia-only: {indonesia_only}")
-    if args.discovery_mode == "wide":
-        source_domain_count = len(
-            {
-                normalize_source_domain(domain)
-                for domain in (DEFAULT_DISCOVERY_SOURCE_DOMAINS + tuple(args.source_domain))
-                if normalize_source_domain(domain)
-            }
+        print(f"[info] mode discovery keyword: {args.discovery_mode}")
+        print(f"[info] filter Indonesia-only: {indonesia_only}")
+        print(f"[info] minimum anggota grup aktif: {min_member_count or 0}")
+        if args.discovery_mode == "wide":
+            source_domain_count = len(resolved_source_domains)
+            print(f"[info] sumber publik tambahan untuk discovery: {source_domain_count} domain")
+        print(
+            f"[info] menjalankan {len(queries)} query dengan provider: {', '.join(providers)}"
         )
-        print(f"[info] sumber publik tambahan untuk discovery: {source_domain_count} domain")
-    print(
-        f"[info] menjalankan {len(queries)} query dengan provider: {', '.join(providers)}"
-    )
-    print(f"[info] worker query paralel: {max_query_workers}")
-    if existing_links:
-        print(f"[info] link yang sudah ada di output akan dilewati: {len(existing_links)}")
-    for index, query in enumerate(queries, start=1):
-        print(f"[info] query siap {index}/{len(queries)}: {query}")
+        print(f"[info] worker query paralel: {max_query_workers}")
+        print(f"[info] worker validasi paralel: {max_validation_workers}")
+        print(f"[info] follow hops: {follow_hops}, max follow pages: {max_follow_pages}")
+        print(f"[info] fetch budget global: {args.max_fetch_budget if args.max_fetch_budget > 0 else 'unlimited'}")
+        print(
+            f"[info] cache validasi: {'mati' if args.no_cache else f'{args.cache_db} (ttl {args.cache_ttl_hours} jam)'}"
+        )
+        if existing_links:
+            print(f"[info] link yang sudah ada di output akan dilewati: {len(existing_links)}")
+        for index, query in enumerate(queries, start=1):
+            print(f"[info] query siap {index}/{len(queries)}: {query}")
 
-    query_results = search_queries_concurrently(
-        platform=args.platform,
-        queries=queries,
-        timeout=args.timeout,
-        delay_seconds=args.delay_seconds,
-        max_search_pages=args.max_search_pages,
-        max_result_pages=args.max_result_pages,
-        providers=providers,
-        max_query_workers=args.max_query_workers,
-    )
-
-    discovered: list[str] = []
-    for query in queries:
-        provider_results = query_results.get(query, {})
-        print(f"[info] query selesai: {query}")
-        query_links: list[str] = []
-        for provider in providers:
-            provider_links = provider_results.get(provider, [])
-            print(f"[info] {provider}: kandidat ditemukan {len(provider_links)}")
-            query_links.extend(provider_links)
-        deduped_query_links = list(dict.fromkeys(query_links))
-        print(f"[info] total kandidat unik per query: {len(deduped_query_links)}")
-        discovered.extend(deduped_query_links)
-
-    unique_discovered = list(dict.fromkeys(discovered))
-    print(f"[info] total kandidat unik: {len(unique_discovered)}")
-    pending_links = [link for link in unique_discovered if link not in existing_link_set]
-    print(f"[info] kandidat baru setelah filter output lama: {len(pending_links)}")
-
-    active_results: list[GroupCheckResult] = []
-    for index, link in enumerate(pending_links, start=1):
-        result = validate_group_link(
-            link,
-            args.platform,
+        query_results = search_queries_concurrently(
+            platform=args.platform,
+            queries=queries,
             timeout=args.timeout,
             delay_seconds=args.delay_seconds,
-            indonesia_only=indonesia_only,
+            max_search_pages=args.max_search_pages,
+            max_result_pages=args.max_result_pages,
+            max_follow_hops=follow_hops,
+            max_follow_pages=max_follow_pages,
+            fetch_budget=fetch_budget,
+            providers=providers,
+            max_query_workers=max_query_workers,
         )
-        if result.status == "active":
-            active_results.append(result)
-            print(f"[ok] {index}/{len(pending_links)} aktif: {result.group_name} -> {result.url}")
-            if args.max_active_groups and len(active_results) >= args.max_active_groups:
-                print(f"[info] batas grup aktif tercapai: {args.max_active_groups}")
-                break
-        elif result.status in {"inactive", "unsupported", "filtered"}:
-            print(
-                f"[skip] {index}/{len(pending_links)} {result.status}: {result.url}"
-                + (f" ({result.reason})" if result.reason else "")
-            )
-        else:
-            print(f"[warn] {index}/{len(pending_links)} gagal cek: {result.url} ({result.reason})")
 
-    if output_path:
-        total_saved, new_saved = save_links(
-            output_path,
-            existing_links,
-            [result.url for result in active_results],
-            args.platform,
+        discovered: list[str] = []
+        for query in queries:
+            provider_results = query_results.get(query, {})
+            print(f"[info] query selesai: {query}")
+            query_links: list[str] = []
+            for provider in providers:
+                provider_links = provider_results.get(provider, [])
+                print(f"[info] {provider}: kandidat ditemukan {len(provider_links)}")
+                query_links.extend(provider_links)
+            deduped_query_links = list(dict.fromkeys(query_links))
+            print(f"[info] total kandidat unik per query: {len(deduped_query_links)}")
+            discovered.extend(deduped_query_links)
+
+        discovered_counter = Counter(discovered)
+        first_seen_index: dict[str, int] = {}
+        for index, link in enumerate(discovered):
+            if link not in first_seen_index:
+                first_seen_index[link] = index
+        unique_discovered = sorted(
+            discovered_counter,
+            key=lambda link: (-discovered_counter[link], first_seen_index[link]),
         )
-        print(f"[info] link aktif baru tersimpan di file: {new_saved}")
-        print(f"[info] total link unik di file output: {total_saved} -> {output_path}")
-    else:
-        print("[info] penyimpanan file lokal dimatikan")
-    if sheet_webhook_url and active_results:
-        try:
-            inserted = sync_rows_to_sheet(
-                sheet_webhook_url,
-                build_sheet_rows(active_results),
-                timeout=max(args.timeout, 10.0),
+        print(f"[info] total kandidat unik: {len(unique_discovered)}")
+        pending_links = [link for link in unique_discovered if link not in existing_link_set]
+        print(f"[info] kandidat baru setelah filter output lama: {len(pending_links)}")
+
+        active_results: list[GroupCheckResult] = []
+        batch_size = max(1, max_validation_workers * 2)
+        stop_validation = False
+        for batch_start in range(0, len(pending_links), batch_size):
+            batch_links = pending_links[batch_start:batch_start + batch_size]
+            batch_results = validate_links_batch(
+                batch_links,
+                args.platform,
+                timeout=args.timeout,
+                delay_seconds=args.delay_seconds,
+                indonesia_only=indonesia_only,
+                min_member_count=min_member_count,
+                max_workers=max_validation_workers,
+                cache=cache,
+                cache_ttl_hours=args.cache_ttl_hours,
             )
-            print(f"[info] hasil aktif terkirim ke sheet tab Grup: {inserted}")
-        except Exception as exc:
-            print(f"[warn] gagal kirim ke sheet: {exc}", file=sys.stderr)
-    return 0
+            for offset, result in enumerate(batch_results, start=batch_start + 1):
+                if result.status == "active":
+                    active_results.append(result)
+                    member_count_text = f" [{result.member_count} anggota]" if result.member_count is not None else ""
+                    print(
+                        f"[ok] {offset}/{len(pending_links)} aktif: {result.group_name}{member_count_text} -> {result.url}"
+                    )
+                    if args.max_active_groups and len(active_results) >= args.max_active_groups:
+                        print(f"[info] batas grup aktif tercapai: {args.max_active_groups}")
+                        stop_validation = True
+                        break
+                elif result.status in {"inactive", "unsupported", "filtered"}:
+                    print(
+                        f"[skip] {offset}/{len(pending_links)} {result.status}: {result.url}"
+                        + (f" ({result.reason})" if result.reason else "")
+                    )
+                else:
+                    print(f"[warn] {offset}/{len(pending_links)} gagal cek: {result.url} ({result.reason})")
+            if stop_validation:
+                break
+
+        if output_path:
+            total_saved, new_saved = save_links(
+                output_path,
+                existing_links,
+                [result.url for result in active_results],
+                args.platform,
+            )
+            print(f"[info] link aktif baru tersimpan di file: {new_saved}")
+            print(f"[info] total link unik di file output: {total_saved} -> {output_path}")
+        else:
+            print("[info] penyimpanan file lokal dimatikan")
+        if sheet_webhook_url and active_results:
+            try:
+                inserted = sync_rows_to_sheet(
+                    sheet_webhook_url,
+                    build_sheet_rows(active_results),
+                    timeout=max(args.timeout, 10.0),
+                )
+                print(f"[info] hasil aktif terkirim ke sheet tab Grup: {inserted}")
+            except Exception as exc:
+                print(f"[warn] gagal kirim ke sheet: {exc}", file=sys.stderr)
+        remaining_budget = fetch_budget.remaining()
+        if remaining_budget is not None:
+            print(f"[info] sisa fetch budget global: {remaining_budget}")
+        return 0
+    finally:
+        if cache is not None:
+            cache.close()
 
 
 if __name__ == "__main__":

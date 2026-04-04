@@ -6,14 +6,17 @@ from urllib.error import HTTPError, URLError
 from unittest.mock import MagicMock, patch
 
 from crawler_wa import (
+    ValidationCache,
     GroupCheckResult,
     adapt_query_for_provider,
     extract_aol_targets,
     build_keyword_discovery_queries,
     build_sheet_rows,
     expand_keywords_to_queries,
+    extract_member_count_from_text,
     extract_telegram_page_extra,
     extract_brave_targets,
+    extract_whatsapp_member_count,
     is_probably_indonesian_group_name,
     is_provider_disabled,
     is_retryable_network_error,
@@ -29,12 +32,15 @@ from crawler_wa import (
     load_saved_links,
     merge_unique_links,
     normalize_invite_url,
+    resolve_discovery_source_domains,
     reset_provider_runtime_state,
     save_links,
+    search_query_with_provider,
     search_queries_concurrently,
     sync_rows_to_sheet,
     validate_group_link,
     validate_telegram_link,
+    validate_whatsapp_link,
     validate_invite,
 )
 
@@ -177,6 +183,11 @@ class InviteParsingTests(unittest.TestCase):
         self.assertIn('site:facebook.com "t.me" komunitas mahasiswa indonesia', queries)
         self.assertIn('site:m.facebook.com "t.me" komunitas mahasiswa indonesia', queries)
 
+    def test_resolve_discovery_source_domains_adds_extra_without_dropping_defaults(self) -> None:
+        domains = resolve_discovery_source_domains(["forumkampus.id"])
+        self.assertIn("facebook.com", domains)
+        self.assertIn("forumkampus.id", domains)
+
     def test_is_probably_indonesian_group_name(self) -> None:
         self.assertTrue(is_probably_indonesian_group_name("Komunitas Mahasiswa Indonesia"))
         self.assertFalse(is_probably_indonesian_group_name("Python India"))
@@ -191,11 +202,19 @@ class InviteParsingTests(unittest.TestCase):
     def test_validate_active_from_meta_title(self) -> None:
         from unittest.mock import patch
 
-        active_html = '<meta property="og:title" content="Komunitas Coding" />'
+        active_html = (
+            '<meta property="og:title" content="Komunitas Coding" />'
+            '<meta property="og:description" content="120 participants" />'
+        )
         with patch("crawler_wa.fetch_text", return_value=active_html):
             result = validate_invite("https://chat.whatsapp.com/AbCdEfGhIjKlMnOpQrStUv", 20, 0)
         self.assertEqual(result.status, "active")
         self.assertEqual(result.group_name, "Komunitas Coding")
+        self.assertEqual(result.member_count, 120)
+
+    def test_extract_whatsapp_member_count(self) -> None:
+        html = '<meta property="og:description" content="2,345 participants" />'
+        self.assertEqual(extract_whatsapp_member_count(html), 2345)
 
     def test_validate_inactive_when_meta_title_empty(self) -> None:
         inactive_html = '<meta property="og:title" content="" />'
@@ -206,6 +225,7 @@ class InviteParsingTests(unittest.TestCase):
     def test_extract_telegram_page_extra(self) -> None:
         html = '<div class="tgme_page_extra">10 655 members, 756 online</div>'
         self.assertEqual(extract_telegram_page_extra(html), "10 655 members, 756 online")
+        self.assertEqual(extract_member_count_from_text(html, ("member", "members")), 10655)
 
     def test_validate_telegram_group_active(self) -> None:
         active_html = """
@@ -217,6 +237,23 @@ class InviteParsingTests(unittest.TestCase):
             result = validate_telegram_link("https://t.me/kelompok_mahasiswa_ti", 20, 0)
         self.assertEqual(result.status, "active")
         self.assertEqual(result.group_name, "Kelompok Mahasiswa TI")
+        self.assertEqual(result.member_count, 1234)
+
+    def test_validate_whatsapp_member_count_filter(self) -> None:
+        active_html = """
+        <meta property="og:title" content="Komunitas Coding Indonesia" />
+        <meta property="og:description" content="49 participants" />
+        """
+        with patch("crawler_wa.fetch_text", return_value=active_html):
+            result = validate_group_link(
+                "https://chat.whatsapp.com/AbCdEfGhIjKlMnOpQrStUv",
+                "whatsapp",
+                20,
+                0,
+                min_member_count=50,
+            )
+        self.assertEqual(result.status, "filtered")
+        self.assertIn("di bawah minimum 50", result.reason or "")
 
     def test_validate_group_link_filters_non_indonesian_active_name(self) -> None:
         active_html = '<meta property="og:title" content="Programming" />'
@@ -296,6 +333,7 @@ class InviteParsingTests(unittest.TestCase):
                     url="https://chat.whatsapp.com/AbCdEfGhIjKlMnOpQrStUv",
                     status="active",
                     group_name="Komunitas Coding",
+                    member_count=120,
                 )
             ]
         )
@@ -304,7 +342,8 @@ class InviteParsingTests(unittest.TestCase):
 
     def test_sync_rows_to_sheet_posts_json(self) -> None:
         response = MagicMock()
-        response.read.return_value = b'{"ok":true}'
+        response.read.return_value = b'{"ok":true,"inserted":1}'
+        response.headers.get_content_charset.return_value = "utf-8"
         response.__enter__.return_value = response
         response.__exit__.return_value = None
         with patch("crawler_wa.urllib.request.urlopen", return_value=response) as mocked_urlopen:
@@ -326,7 +365,18 @@ class InviteParsingTests(unittest.TestCase):
         self.assertEqual(request.full_url, "https://example.com/webapp")
 
     def test_search_queries_concurrently_collects_all_queries(self) -> None:
-        def fake_search_query(platform, query, timeout, delay_seconds, max_search_pages, max_result_pages, providers):
+        def fake_search_query(
+            platform,
+            query,
+            timeout,
+            delay_seconds,
+            max_search_pages,
+            max_result_pages,
+            max_follow_hops,
+            max_follow_pages,
+            fetch_budget,
+            providers,
+        ):
             return {provider: [f"https://example.com/{query}/{provider}"] for provider in providers}
 
         with patch("crawler_wa.search_query", side_effect=fake_search_query):
@@ -337,6 +387,9 @@ class InviteParsingTests(unittest.TestCase):
                 delay_seconds=0,
                 max_search_pages=1,
                 max_result_pages=1,
+                max_follow_hops=1,
+                max_follow_pages=2,
+                fetch_budget=None,
                 providers=["duckduckgo", "brave"],
                 max_query_workers=2,
             )
@@ -346,6 +399,52 @@ class InviteParsingTests(unittest.TestCase):
             results["q1"]["duckduckgo"],
             ["https://example.com/q1/duckduckgo"],
         )
+
+    def test_validation_cache_roundtrip(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            cache = ValidationCache(Path(tmpdir) / "cache.sqlite3")
+            try:
+                cache.put(
+                    GroupCheckResult(
+                        platform="telegram",
+                        url="https://t.me/mahasiswa_mahasiswi",
+                        status="active",
+                        group_name="Grup Mahasiswa Indonesia Raya",
+                        member_count=17536,
+                    )
+                )
+                cached = cache.get("telegram", "https://t.me/mahasiswa_mahasiswi", ttl_hours=72)
+            finally:
+                cache.close()
+        self.assertIsNotNone(cached)
+        assert cached is not None
+        self.assertEqual(cached.status, "active")
+        self.assertEqual(cached.member_count, 17536)
+
+    def test_search_query_with_provider_follows_one_hop(self) -> None:
+        with (
+            patch("crawler_wa.fetch_search_body", return_value="<html></html>"),
+            patch("crawler_wa.extract_provider_targets", return_value=["https://example.com/root"]),
+            patch(
+                "crawler_wa.fetch_text",
+                side_effect=[
+                    '<a href="/inner">lanjut</a>',
+                    '<a href="https://t.me/mahasiswa_mahasiswi">grup</a>',
+                ],
+            ),
+        ):
+            results = search_query_with_provider(
+                platform="telegram",
+                provider="duckduckgo",
+                query="komunitas mahasiswa",
+                timeout=5,
+                delay_seconds=0,
+                max_search_pages=1,
+                max_result_pages=1,
+                max_follow_hops=1,
+                max_follow_pages=2,
+            )
+        self.assertIn("https://t.me/mahasiswa_mahasiswi", results)
 
     def test_retryable_network_error_detects_ssl_eof(self) -> None:
         exc = URLError(ssl.SSLError("EOF occurred in violation of protocol (_ssl.c:1032)"))
