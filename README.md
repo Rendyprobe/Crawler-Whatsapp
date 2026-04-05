@@ -5,7 +5,10 @@ CLI Python untuk mencari link grup publik WhatsApp atau Telegram dari hasil penc
 Perilaku default saat ini:
 - platform dipilih lewat `--platform whatsapp` atau `--platform telegram`
 - keyword akan diperluas ke banyak query discovery publik dalam mode `wide`
-- provider default difokuskan ke `duckduckgo`, `yahoo`, `aol`, dan `brave`
+- provider default per platform:
+  - WhatsApp: `brave`
+  - Telegram: `duckduckgo`, `yahoo`, `aol`, dan `brave`
+- untuk WhatsApp dengan provider default `brave`, worker query default diturunkan agar lebih tahan terhadap rate limit
 - grup aktif difilter minimum `50` anggota jika jumlah anggota bisa dibaca dari metadata
 - crawler mengikuti sampai `2` hop tambahan dari halaman hasil untuk menangkap link grup yang tersembunyi di halaman lanjutan
 - hasil validasi disimpan ke cache SQLite selama `72` jam agar link yang sama tidak dicek ulang setiap run

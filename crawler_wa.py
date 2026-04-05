@@ -44,9 +44,14 @@ SITE_OPERATOR_PATTERN = re.compile(r"\bsite:[^\s]+\b", re.IGNORECASE)
 REDIRECT_WRAPPER_PATTERN = re.compile(r"/RU=([^/]+)/RK=", re.IGNORECASE)
 SUPPORTED_PROVIDERS = ("duckduckgo", "brave", "yahoo", "aol", "google")
 DEFAULT_ENABLED_PROVIDERS = ("duckduckgo", "yahoo", "aol", "brave")
+DEFAULT_ENABLED_PROVIDERS_BY_PLATFORM = {
+    "whatsapp": ("brave",),
+    "telegram": DEFAULT_ENABLED_PROVIDERS,
+}
 SUPPORTED_PLATFORMS = ("whatsapp", "telegram")
 SUPPORTED_DISCOVERY_MODES = ("focused", "wide")
 DEFAULT_MAX_QUERY_WORKERS = 8
+DEFAULT_MAX_QUERY_WORKERS_WHATSAPP_BRAVE = 2
 DEFAULT_MAX_VALIDATION_WORKERS = 8
 DEFAULT_FOLLOW_HOPS = 2
 DEFAULT_MAX_FOLLOW_PAGES = 3
@@ -181,7 +186,11 @@ INDONESIA_TITLE_KEYWORDS = (
     "indonesia",
     "indo",
     "nusantara",
+    "nasional",
     "warga",
+    "anak muda",
+    "muda",
+    "pemuda",
     "mahasiswa",
     "kampus",
     "kuliah",
@@ -194,6 +203,35 @@ INDONESIA_TITLE_KEYWORDS = (
     "belajar",
     "bareng",
     "ngoding",
+    "kerja",
+    "lowongan",
+    "loker",
+    "karier",
+    "bisnis",
+    "wirausaha",
+    "pengusaha",
+    "usaha",
+    "umkm",
+    "online shop",
+    "toko online",
+    "reseller",
+    "dropship",
+    "affiliate",
+    "creator",
+    "kreator",
+    "konten",
+    "marketing",
+    "pemasaran",
+    "startup",
+    "freelancer",
+    "remote",
+    "properti",
+    "pertanian",
+    "desain",
+    "desainer",
+    "digital",
+    "chatgpt",
+    "ai",
     "teknik informatika",
     "sistem informasi",
     "ilmu komputer",
@@ -800,6 +838,27 @@ def resolve_discovery_source_domains(extra_domains: Iterable[str] | None = None)
         seen.add(normalized)
         resolved.append(normalized)
     return tuple(resolved)
+
+
+def resolve_providers(platform: str, providers: Iterable[str] | None = None) -> list[str]:
+    if providers:
+        return list(dict.fromkeys(providers))
+    return list(DEFAULT_ENABLED_PROVIDERS_BY_PLATFORM.get(platform, DEFAULT_ENABLED_PROVIDERS))
+
+
+def resolve_max_query_workers(
+    platform: str,
+    providers: Iterable[str],
+    query_count: int,
+    requested_workers: int | None = None,
+) -> int:
+    if requested_workers:
+        return max(1, requested_workers)
+    default_workers = DEFAULT_MAX_QUERY_WORKERS
+    normalized_providers = list(dict.fromkeys(providers))
+    if platform == "whatsapp" and normalized_providers == ["brave"]:
+        default_workers = DEFAULT_MAX_QUERY_WORKERS_WHATSAPP_BRAVE
+    return max(1, min(query_count, default_workers))
 
 
 def parse_member_count_token(value: str) -> int | None:
@@ -1515,6 +1574,8 @@ def apply_member_count_filter(result: GroupCheckResult, min_member_count: int | 
     if min_member_count is None or result.status != "active":
         return result
     if result.member_count is None:
+        if result.platform == "whatsapp":
+            return result
         return GroupCheckResult(
             platform=result.platform,
             url=result.url,
@@ -1903,10 +1964,15 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("Tidak ada query. Gunakan --query-file, --query, --keyword-file, atau --keyword.")
         if not output_path and not sheet_webhook_url:
             parser.error("Tidak ada sink hasil. Gunakan --output atau aktifkan sheet sync.")
-        providers = args.provider or list(DEFAULT_ENABLED_PROVIDERS)
+        providers = resolve_providers(args.platform, args.provider)
         existing_links = load_saved_links(output_path, args.platform) if output_path else []
         existing_link_set = set(existing_links)
-        max_query_workers = max(1, args.max_query_workers or min(len(queries), DEFAULT_MAX_QUERY_WORKERS))
+        max_query_workers = resolve_max_query_workers(
+            args.platform,
+            providers,
+            len(queries),
+            args.max_query_workers,
+        )
         reset_provider_runtime_state()
 
         print(

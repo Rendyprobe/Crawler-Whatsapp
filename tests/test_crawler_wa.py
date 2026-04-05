@@ -32,6 +32,8 @@ from crawler_wa import (
     load_saved_links,
     merge_unique_links,
     normalize_invite_url,
+    resolve_providers,
+    resolve_max_query_workers,
     resolve_discovery_source_domains,
     reset_provider_runtime_state,
     save_links,
@@ -188,8 +190,18 @@ class InviteParsingTests(unittest.TestCase):
         self.assertIn("facebook.com", domains)
         self.assertIn("forumkampus.id", domains)
 
+    def test_resolve_providers_uses_platform_defaults(self) -> None:
+        self.assertEqual(resolve_providers("whatsapp"), ["brave"])
+        self.assertEqual(resolve_providers("telegram"), ["duckduckgo", "yahoo", "aol", "brave"])
+
+    def test_resolve_max_query_workers_lowers_whatsapp_brave_default(self) -> None:
+        self.assertEqual(resolve_max_query_workers("whatsapp", ["brave"], 20), 2)
+        self.assertEqual(resolve_max_query_workers("telegram", ["duckduckgo", "brave"], 20), 8)
+
     def test_is_probably_indonesian_group_name(self) -> None:
         self.assertTrue(is_probably_indonesian_group_name("Komunitas Mahasiswa Indonesia"))
+        self.assertTrue(is_probably_indonesian_group_name("LOWONGAN KERJA 2025"))
+        self.assertTrue(is_probably_indonesian_group_name("WIRAUSAHA MUDA INDONESIA"))
         self.assertFalse(is_probably_indonesian_group_name("Python India"))
         self.assertFalse(is_probably_indonesian_group_name("مجموعة طلاب"))
 
@@ -254,6 +266,19 @@ class InviteParsingTests(unittest.TestCase):
             )
         self.assertEqual(result.status, "filtered")
         self.assertIn("di bawah minimum 50", result.reason or "")
+
+    def test_validate_whatsapp_unknown_member_count_is_not_filtered(self) -> None:
+        active_html = '<meta property="og:title" content="Komunitas Coding Indonesia" />'
+        with patch("crawler_wa.fetch_text", return_value=active_html):
+            result = validate_group_link(
+                "https://chat.whatsapp.com/AbCdEfGhIjKlMnOpQrStUv",
+                "whatsapp",
+                20,
+                0,
+                min_member_count=50,
+            )
+        self.assertEqual(result.status, "active")
+        self.assertIsNone(result.member_count)
 
     def test_validate_group_link_filters_non_indonesian_active_name(self) -> None:
         active_html = '<meta property="og:title" content="Programming" />'
