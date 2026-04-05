@@ -17,6 +17,7 @@ Perilaku default saat ini:
 - sink default adalah Google Sheets, bukan file lokal
 - file lokal hanya dibuat jika `--output` diisi
 - nama grup difilter ke grup Indonesia secara default
+- tersedia mode scheduler untuk menjalankan crawler berulang dan terus menambah hasil baru ke sheet
 - provider pencarian yang tersedia: `duckduckgo`, `brave`, `yahoo`, `aol`, `google`
 
 ## Cara Pakai
@@ -128,6 +129,29 @@ python3 crawler_wa.py \
   --allow-global-groups
 ```
 
+Jalankan scheduler agar crawler rutin menambah hasil ke sheet:
+
+```bash
+python3 crawler_wa.py \
+  --platform whatsapp \
+  --discovery-mode focused \
+  --keyword 'komunitas ai indonesia' \
+  --keyword 'komunitas umkm indonesia' \
+  --max-active-groups 10 \
+  --max-query-workers 1 \
+  --schedule-every-minutes 60
+```
+
+Contoh scheduler dengan batas jumlah siklus:
+
+```bash
+python3 crawler_wa.py \
+  --platform whatsapp \
+  --keyword 'komunitas digital marketing' \
+  --schedule-every-minutes 30 \
+  --schedule-max-runs 4
+```
+
 File contoh yang sudah dipisah per platform:
 - `keywords.whatsapp.txt`
 - `queries.whatsapp.txt`
@@ -152,6 +176,9 @@ Opsi yang paling sering dipakai:
 - `--cache-db`: path file cache SQLite untuk status validasi link
 - `--cache-ttl-hours`: umur maksimum cache validasi sebelum dicek ulang
 - `--no-cache`: matikan cache SQLite
+- `--schedule-every-minutes`: aktifkan mode scheduler dan jalankan ulang tiap N menit
+- `--schedule-max-runs`: batasi jumlah siklus scheduler
+- `--schedule-initial-delay-seconds`: tunda run pertama saat scheduler aktif
 - `--output`: simpan hasil aktif ke file lokal
 - `--no-sheet-sync`: matikan pengiriman default ke sheet
 - `--allow-global-groups`: matikan filter grup Indonesia

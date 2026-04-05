@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 from urllib.error import HTTPError, URLError
 
 USER_AGENT = (
@@ -58,6 +58,7 @@ DEFAULT_MAX_FOLLOW_PAGES = 3
 DEFAULT_MAX_FETCH_BUDGET = 200
 DEFAULT_CACHE_DB_PATH = Path("crawler_cache.sqlite3")
 DEFAULT_CACHE_TTL_HOURS = 72.0
+DEFAULT_SCHEDULE_INITIAL_DELAY_SECONDS = 0.0
 PLATFORM_QUERY_TEMPLATES = {
     "whatsapp": "site:chat.whatsapp.com {keyword} whatsapp indonesia",
     "telegram": "site:t.me {keyword} telegram indonesia",
@@ -1930,12 +1931,29 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Matikan cache SQLite validasi lintas run.",
     )
+    parser.add_argument(
+        "--schedule-every-minutes",
+        type=float,
+        help="Jalankan crawler berulang tiap N menit. Jika kosong, crawler hanya jalan sekali.",
+    )
+    parser.add_argument(
+        "--schedule-max-runs",
+        type=int,
+        help="Batas jumlah siklus scheduler. Kosongkan untuk terus berjalan sampai dihentikan.",
+    )
+    parser.add_argument(
+        "--schedule-initial-delay-seconds",
+        type=float,
+        default=DEFAULT_SCHEDULE_INITIAL_DELAY_SECONDS,
+        help=(
+            "Tunda run pertama dalam mode scheduler. "
+            f"Default: {DEFAULT_SCHEDULE_INITIAL_DELAY_SECONDS} detik."
+        ),
+    )
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
+def run_once(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     output_path = args.output
     sheet_webhook_url = None if args.no_sheet_sync else args.sheet_webhook_url
     indonesia_only = not args.allow_global_groups
@@ -2104,6 +2122,60 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if cache is not None:
             cache.close()
+
+
+def run_scheduler(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+    run_once_fn: Callable[[argparse.Namespace, argparse.ArgumentParser], int] = run_once,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> int:
+    interval_minutes = args.schedule_every_minutes
+    if interval_minutes is None:
+        return run_once_fn(args, parser)
+    if interval_minutes <= 0:
+        parser.error("--schedule-every-minutes harus lebih besar dari 0.")
+
+    max_runs = args.schedule_max_runs if args.schedule_max_runs and args.schedule_max_runs > 0 else None
+    initial_delay = max(0.0, args.schedule_initial_delay_seconds)
+    interval_seconds = interval_minutes * 60.0
+    run_count = 0
+    last_exit_code = 0
+
+    if initial_delay:
+        print(f"[schedule] menunggu {initial_delay:.1f} detik sebelum run pertama")
+        sleep_fn(initial_delay)
+
+    while True:
+        run_count += 1
+        started_at = datetime.now().astimezone()
+        print(f"[schedule] mulai run {run_count} pada {started_at.isoformat(timespec='seconds')}")
+        last_exit_code = run_once_fn(args, parser)
+        finished_at = datetime.now().astimezone()
+        print(
+            f"[schedule] run {run_count} selesai pada {finished_at.isoformat(timespec='seconds')} "
+            f"dengan exit code {last_exit_code}"
+        )
+        if max_runs is not None and run_count >= max_runs:
+            print(f"[schedule] batas run tercapai: {run_count}/{max_runs}")
+            return last_exit_code
+        next_started_at = datetime.now().astimezone().timestamp() + interval_seconds
+        next_run_at = datetime.fromtimestamp(next_started_at, tz=started_at.tzinfo)
+        print(
+            f"[schedule] tidur {interval_seconds:.1f} detik, run berikutnya sekitar "
+            f"{next_run_at.isoformat(timespec='seconds')}"
+        )
+        sleep_fn(interval_seconds)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return run_scheduler(args, parser)
+    except KeyboardInterrupt:
+        print("[info] scheduler dihentikan oleh pengguna", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

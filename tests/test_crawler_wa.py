@@ -1,5 +1,6 @@
 import ssl
 import unittest
+from argparse import Namespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.error import HTTPError, URLError
@@ -36,6 +37,7 @@ from crawler_wa import (
     resolve_max_query_workers,
     resolve_discovery_source_domains,
     reset_provider_runtime_state,
+    run_scheduler,
     save_links,
     search_query_with_provider,
     search_queries_concurrently,
@@ -197,6 +199,26 @@ class InviteParsingTests(unittest.TestCase):
     def test_resolve_max_query_workers_lowers_whatsapp_brave_default(self) -> None:
         self.assertEqual(resolve_max_query_workers("whatsapp", ["brave"], 20), 2)
         self.assertEqual(resolve_max_query_workers("telegram", ["duckduckgo", "brave"], 20), 8)
+
+    def test_run_scheduler_without_schedule_runs_once(self) -> None:
+        args = Namespace(schedule_every_minutes=None, schedule_max_runs=None, schedule_initial_delay_seconds=0.0)
+        parser = MagicMock()
+        run_once_fn = MagicMock(return_value=0)
+        sleep_fn = MagicMock()
+        exit_code = run_scheduler(args, parser, run_once_fn=run_once_fn, sleep_fn=sleep_fn)
+        self.assertEqual(exit_code, 0)
+        run_once_fn.assert_called_once_with(args, parser)
+        sleep_fn.assert_not_called()
+
+    def test_run_scheduler_stops_after_max_runs(self) -> None:
+        args = Namespace(schedule_every_minutes=0.1, schedule_max_runs=2, schedule_initial_delay_seconds=0.0)
+        parser = MagicMock()
+        run_once_fn = MagicMock(return_value=0)
+        sleep_fn = MagicMock()
+        exit_code = run_scheduler(args, parser, run_once_fn=run_once_fn, sleep_fn=sleep_fn)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(run_once_fn.call_count, 2)
+        sleep_fn.assert_called_once_with(6.0)
 
     def test_is_probably_indonesian_group_name(self) -> None:
         self.assertTrue(is_probably_indonesian_group_name("Komunitas Mahasiswa Indonesia"))
