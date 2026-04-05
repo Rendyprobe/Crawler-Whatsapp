@@ -10,9 +10,12 @@ from crawler_wa import (
     ValidationCache,
     GroupCheckResult,
     adapt_query_for_provider,
+    build_interactive_args,
+    build_parser,
     extract_aol_targets,
     build_keyword_discovery_queries,
     build_sheet_rows,
+    default_keyword_file_for_platform,
     expand_keywords_to_queries,
     extract_member_count_from_text,
     extract_telegram_page_extra,
@@ -33,6 +36,7 @@ from crawler_wa import (
     load_saved_links,
     merge_unique_links,
     normalize_invite_url,
+    parse_comma_separated_values,
     resolve_providers,
     resolve_max_query_workers,
     resolve_discovery_source_domains,
@@ -41,6 +45,7 @@ from crawler_wa import (
     save_links,
     search_query_with_provider,
     search_queries_concurrently,
+    should_start_interactive_mode,
     sync_rows_to_sheet,
     validate_group_link,
     validate_telegram_link,
@@ -192,6 +197,18 @@ class InviteParsingTests(unittest.TestCase):
         self.assertIn("facebook.com", domains)
         self.assertIn("forumkampus.id", domains)
 
+    def test_default_keyword_file_for_platform(self) -> None:
+        self.assertEqual(default_keyword_file_for_platform("whatsapp").name, "keywords.whatsapp.txt")
+        self.assertEqual(default_keyword_file_for_platform("telegram").name, "keywords.telegram.txt")
+
+    def test_should_start_interactive_mode(self) -> None:
+        self.assertTrue(should_start_interactive_mode([], True, True))
+        self.assertTrue(should_start_interactive_mode(["--interactive"], False, False))
+        self.assertFalse(should_start_interactive_mode(["--platform", "whatsapp"], True, True))
+
+    def test_parse_comma_separated_values(self) -> None:
+        self.assertEqual(parse_comma_separated_values("ai, startup, , umkm"), ["ai", "startup", "umkm"])
+
     def test_resolve_providers_uses_platform_defaults(self) -> None:
         self.assertEqual(resolve_providers("whatsapp"), ["brave"])
         self.assertEqual(resolve_providers("telegram"), ["duckduckgo", "yahoo", "aol", "brave"])
@@ -219,6 +236,41 @@ class InviteParsingTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(run_once_fn.call_count, 2)
         sleep_fn.assert_called_once_with(6.0)
+
+    def test_build_interactive_args_uses_sample_keywords_and_scheduler(self) -> None:
+        parser = build_parser()
+        base_args = parser.parse_args(["--interactive"])
+        answers = iter(
+            [
+                "1",   # platform whatsapp
+                "1",   # discovery focused
+                "1",   # sample keywords
+                "7",   # max active groups
+                "0",   # min member count
+                "n",   # allow global groups
+                "0",   # follow hops
+                "1",   # query workers
+                "y",   # sheet sync
+                "n",   # no local file
+                "2",   # scheduler
+                "30",  # schedule every minutes
+                "2",   # max runs
+                "5",   # initial delay seconds
+            ]
+        )
+        args = build_interactive_args(parser, base_args, input_fn=lambda _: next(answers), output_fn=lambda _: None)
+        self.assertEqual(args.platform, "whatsapp")
+        self.assertEqual(args.keyword_file, default_keyword_file_for_platform("whatsapp"))
+        self.assertEqual(args.max_active_groups, 7)
+        self.assertEqual(args.min_member_count, 0)
+        self.assertFalse(args.allow_global_groups)
+        self.assertEqual(args.follow_hops, 0)
+        self.assertEqual(args.max_query_workers, 1)
+        self.assertFalse(args.no_sheet_sync)
+        self.assertIsNone(args.output)
+        self.assertEqual(args.schedule_every_minutes, 30.0)
+        self.assertEqual(args.schedule_max_runs, 2)
+        self.assertEqual(args.schedule_initial_delay_seconds, 5.0)
 
     def test_is_probably_indonesian_group_name(self) -> None:
         self.assertTrue(is_probably_indonesian_group_name("Komunitas Mahasiswa Indonesia"))

@@ -59,6 +59,16 @@ DEFAULT_MAX_FETCH_BUDGET = 200
 DEFAULT_CACHE_DB_PATH = Path("crawler_cache.sqlite3")
 DEFAULT_CACHE_TTL_HOURS = 72.0
 DEFAULT_SCHEDULE_INITIAL_DELAY_SECONDS = 0.0
+DEFAULT_INTERACTIVE_WHATSAPP_DISCOVERY_MODE = "focused"
+DEFAULT_INTERACTIVE_TELEGRAM_DISCOVERY_MODE = "wide"
+DEFAULT_INTERACTIVE_WHATSAPP_FOLLOW_HOPS = 0
+DEFAULT_INTERACTIVE_TELEGRAM_FOLLOW_HOPS = DEFAULT_FOLLOW_HOPS
+DEFAULT_INTERACTIVE_MAX_ACTIVE_GROUPS = 10
+DEFAULT_INTERACTIVE_SCHEDULE_MINUTES = 60.0
+DEFAULT_INTERACTIVE_QUERY_CHOICES = {
+    "whatsapp": Path(__file__).with_name("keywords.whatsapp.txt"),
+    "telegram": Path(__file__).with_name("keywords.telegram.txt"),
+}
 PLATFORM_QUERY_TEMPLATES = {
     "whatsapp": "site:chat.whatsapp.com {keyword} whatsapp indonesia",
     "telegram": "site:t.me {keyword} telegram indonesia",
@@ -860,6 +870,354 @@ def resolve_max_query_workers(
     if platform == "whatsapp" and normalized_providers == ["brave"]:
         default_workers = DEFAULT_MAX_QUERY_WORKERS_WHATSAPP_BRAVE
     return max(1, min(query_count, default_workers))
+
+
+def default_keyword_file_for_platform(platform: str) -> Path:
+    return DEFAULT_INTERACTIVE_QUERY_CHOICES[platform]
+
+
+def default_discovery_mode_for_platform(platform: str) -> str:
+    if platform == "whatsapp":
+        return DEFAULT_INTERACTIVE_WHATSAPP_DISCOVERY_MODE
+    return DEFAULT_INTERACTIVE_TELEGRAM_DISCOVERY_MODE
+
+
+def default_follow_hops_for_platform(platform: str) -> int:
+    if platform == "whatsapp":
+        return DEFAULT_INTERACTIVE_WHATSAPP_FOLLOW_HOPS
+    return DEFAULT_INTERACTIVE_TELEGRAM_FOLLOW_HOPS
+
+
+def should_start_interactive_mode(argv: list[str], stdin_is_tty: bool, stdout_is_tty: bool) -> bool:
+    return "--interactive" in argv or (not argv and stdin_is_tty and stdout_is_tty)
+
+
+def parse_comma_separated_values(raw: str) -> list[str]:
+    return [value.strip() for value in raw.split(",") if value.strip()]
+
+
+def prompt_choice(
+    title: str,
+    options: list[tuple[str, str, str]],
+    default_value: str,
+    input_fn: Callable[[str], str] = input,
+    output_fn: Callable[[str], None] = print,
+) -> str:
+    output_fn(title)
+    for key, label, _ in options:
+        output_fn(f"  {key}. {label}")
+    default_key = next((key for key, _, value in options if value == default_value), options[0][0])
+    while True:
+        raw = input_fn(f"Pilih [{default_key}]: ").strip()
+        selected_key = raw or default_key
+        for key, _, value in options:
+            if selected_key == key:
+                return value
+        output_fn("Pilihan tidak valid. Coba lagi.")
+
+
+def prompt_text(
+    label: str,
+    default_value: str | None = None,
+    required: bool = False,
+    input_fn: Callable[[str], str] = input,
+    output_fn: Callable[[str], None] = print,
+) -> str:
+    while True:
+        suffix = f" [{default_value}]" if default_value not in {None, ''} else ""
+        raw = input_fn(f"{label}{suffix}: ").strip()
+        if raw:
+            return raw
+        if default_value is not None:
+            return default_value
+        if not required:
+            return ""
+        output_fn("Input wajib diisi.")
+
+
+def prompt_int(
+    label: str,
+    default_value: int,
+    minimum: int = 0,
+    input_fn: Callable[[str], str] = input,
+    output_fn: Callable[[str], None] = print,
+) -> int:
+    while True:
+        raw = input_fn(f"{label} [{default_value}]: ").strip()
+        if not raw:
+            return default_value
+        try:
+            value = int(raw)
+        except ValueError:
+            output_fn("Masukkan angka yang valid.")
+            continue
+        if value < minimum:
+            output_fn(f"Nilai minimal {minimum}.")
+            continue
+        return value
+
+
+def prompt_float(
+    label: str,
+    default_value: float,
+    minimum: float = 0.0,
+    input_fn: Callable[[str], str] = input,
+    output_fn: Callable[[str], None] = print,
+) -> float:
+    while True:
+        raw = input_fn(f"{label} [{default_value}]: ").strip()
+        if not raw:
+            return default_value
+        try:
+            value = float(raw)
+        except ValueError:
+            output_fn("Masukkan angka yang valid.")
+            continue
+        if value < minimum:
+            output_fn(f"Nilai minimal {minimum}.")
+            continue
+        return value
+
+
+def prompt_yes_no(
+    label: str,
+    default: bool,
+    input_fn: Callable[[str], str] = input,
+    output_fn: Callable[[str], None] = print,
+) -> bool:
+    default_label = "Y/n" if default else "y/N"
+    while True:
+        raw = input_fn(f"{label} [{default_label}]: ").strip().lower()
+        if not raw:
+            return default
+        if raw in {"y", "yes"}:
+            return True
+        if raw in {"n", "no"}:
+            return False
+        output_fn("Jawab y atau n.")
+
+
+def prompt_existing_path(
+    label: str,
+    default_path: Path | None = None,
+    input_fn: Callable[[str], str] = input,
+    output_fn: Callable[[str], None] = print,
+) -> Path:
+    while True:
+        raw = prompt_text(
+            label,
+            default_value=str(default_path) if default_path else None,
+            required=True,
+            input_fn=input_fn,
+            output_fn=output_fn,
+        )
+        path = Path(raw).expanduser()
+        if path.exists():
+            return path
+        output_fn(f"File tidak ditemukan: {path}")
+
+
+def build_interactive_args(
+    parser: argparse.ArgumentParser,
+    base_args: argparse.Namespace,
+    input_fn: Callable[[str], str] = input,
+    output_fn: Callable[[str], None] = print,
+) -> argparse.Namespace:
+    args = argparse.Namespace(**vars(base_args))
+    output_fn("Mode interaktif crawler grup")
+    output_fn("Tekan Enter untuk memakai nilai default.")
+
+    args.platform = prompt_choice(
+        "Pilih platform:",
+        [
+            ("1", "WhatsApp", "whatsapp"),
+            ("2", "Telegram", "telegram"),
+        ],
+        default_value=args.platform,
+        input_fn=input_fn,
+        output_fn=output_fn,
+    )
+    args.discovery_mode = prompt_choice(
+        "Pilih mode discovery:",
+        [
+            ("1", "Focused", "focused"),
+            ("2", "Wide", "wide"),
+        ],
+        default_value=default_discovery_mode_for_platform(args.platform),
+        input_fn=input_fn,
+        output_fn=output_fn,
+    )
+    keyword_source = prompt_choice(
+        "Pilih sumber keyword/query:",
+        [
+            ("1", "Semua keyword contoh bawaan", "sample"),
+            ("2", "Keyword sendiri (pisahkan dengan koma)", "custom"),
+            ("3", "File keyword sendiri", "keyword_file"),
+            ("4", "Query mentah sendiri (pisahkan dengan koma)", "query"),
+            ("5", "File query sendiri", "query_file"),
+        ],
+        default_value="sample",
+        input_fn=input_fn,
+        output_fn=output_fn,
+    )
+
+    args.keyword = []
+    args.query = []
+    args.keyword_file = None
+    args.query_file = None
+    if keyword_source == "sample":
+        args.keyword_file = default_keyword_file_for_platform(args.platform)
+    elif keyword_source == "custom":
+        while True:
+            raw_keywords = prompt_text(
+                "Masukkan keyword",
+                required=True,
+                input_fn=input_fn,
+                output_fn=output_fn,
+            )
+            args.keyword = parse_comma_separated_values(raw_keywords)
+            if args.keyword:
+                break
+            output_fn("Masukkan minimal satu keyword.")
+    elif keyword_source == "keyword_file":
+        args.keyword_file = prompt_existing_path(
+            "Masukkan path file keyword",
+            default_path=default_keyword_file_for_platform(args.platform),
+            input_fn=input_fn,
+            output_fn=output_fn,
+        )
+    elif keyword_source == "query":
+        while True:
+            raw_queries = prompt_text(
+                "Masukkan query mentah",
+                required=True,
+                input_fn=input_fn,
+                output_fn=output_fn,
+            )
+            args.query = parse_comma_separated_values(raw_queries)
+            if args.query:
+                break
+            output_fn("Masukkan minimal satu query.")
+    else:
+        args.query_file = prompt_existing_path(
+            "Masukkan path file query",
+            input_fn=input_fn,
+            output_fn=output_fn,
+        )
+
+    args.max_active_groups = prompt_int(
+        "Berapa grup aktif yang ingin dicari?",
+        default_value=args.max_active_groups or DEFAULT_INTERACTIVE_MAX_ACTIVE_GROUPS,
+        minimum=1,
+        input_fn=input_fn,
+        output_fn=output_fn,
+    )
+    args.min_member_count = prompt_int(
+        "Minimum anggota grup aktif? (0 untuk matikan filter)",
+        default_value=args.min_member_count,
+        minimum=0,
+        input_fn=input_fn,
+        output_fn=output_fn,
+    )
+    args.allow_global_groups = prompt_yes_no(
+        "Izinkan grup non-Indonesia?",
+        default=False,
+        input_fn=input_fn,
+        output_fn=output_fn,
+    )
+    args.follow_hops = prompt_int(
+        "Follow hop tambahan dari halaman hasil",
+        default_value=default_follow_hops_for_platform(args.platform),
+        minimum=0,
+        input_fn=input_fn,
+        output_fn=output_fn,
+    )
+    args.max_query_workers = prompt_int(
+        "Worker query paralel",
+        default_value=resolve_max_query_workers(
+            args.platform,
+            resolve_providers(args.platform, args.provider),
+            query_count=1,
+            requested_workers=args.max_query_workers,
+        ),
+        minimum=1,
+        input_fn=input_fn,
+        output_fn=output_fn,
+    )
+    args.no_sheet_sync = not prompt_yes_no(
+        "Kirim hasil aktif ke Google Sheet?",
+        default=not base_args.no_sheet_sync,
+        input_fn=input_fn,
+        output_fn=output_fn,
+    )
+    if prompt_yes_no(
+        "Simpan juga hasil ke file txt lokal?",
+        default=False,
+        input_fn=input_fn,
+        output_fn=output_fn,
+    ):
+        output_default = f"active_{args.platform}_links.txt"
+        args.output = Path(
+            prompt_text(
+                "Nama file output",
+                default_value=output_default,
+                required=True,
+                input_fn=input_fn,
+                output_fn=output_fn,
+            )
+        )
+    else:
+        args.output = None
+
+    schedule_mode = prompt_choice(
+        "Jalankan sekali atau rutin?",
+        [
+            ("1", "Sekali jalan", "once"),
+            ("2", "Scheduler / rutin", "schedule"),
+        ],
+        default_value="once",
+        input_fn=input_fn,
+        output_fn=output_fn,
+    )
+    if schedule_mode == "schedule":
+        args.schedule_every_minutes = prompt_float(
+            "Interval scheduler dalam menit",
+            default_value=args.schedule_every_minutes or DEFAULT_INTERACTIVE_SCHEDULE_MINUTES,
+            minimum=0.1,
+            input_fn=input_fn,
+            output_fn=output_fn,
+        )
+        schedule_max_runs = prompt_text(
+            "Batas jumlah run scheduler (kosong = terus jalan)",
+            default_value="",
+            input_fn=input_fn,
+            output_fn=output_fn,
+        )
+        args.schedule_max_runs = int(schedule_max_runs) if schedule_max_runs.strip() else None
+        args.schedule_initial_delay_seconds = prompt_float(
+            "Tunda run pertama dalam detik",
+            default_value=args.schedule_initial_delay_seconds,
+            minimum=0.0,
+            input_fn=input_fn,
+            output_fn=output_fn,
+        )
+    else:
+        args.schedule_every_minutes = None
+        args.schedule_max_runs = None
+        args.schedule_initial_delay_seconds = 0.0
+
+    summary_parts = [
+        f"platform={args.platform}",
+        f"mode={args.discovery_mode}",
+        f"target={args.max_active_groups}",
+        f"min_anggota={args.min_member_count}",
+        f"sheet={'on' if not args.no_sheet_sync else 'off'}",
+        f"scheduler={'on' if args.schedule_every_minutes else 'off'}",
+    ]
+    output_fn(f"[interactive] konfigurasi: {', '.join(summary_parts)}")
+    if not args.output and args.no_sheet_sync:
+        parser.error("Tidak ada sink hasil. Aktifkan sheet sync atau simpan ke file lokal.")
+    return args
 
 
 def parse_member_count_token(value: str) -> int | None:
@@ -1789,6 +2147,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Cari link grup WhatsApp atau Telegram publik, cek aktif/tidak, lalu simpan yang aktif."
     )
     parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Jalankan wizard interaktif di terminal.",
+    )
+    parser.add_argument(
         "--platform",
         choices=SUPPORTED_PLATFORMS,
         default="whatsapp",
@@ -2170,7 +2533,12 @@ def run_scheduler(
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    parsed_args = parser.parse_args(raw_argv)
+    if should_start_interactive_mode(raw_argv, sys.stdin.isatty(), sys.stdout.isatty()):
+        args = build_interactive_args(parser, parsed_args)
+    else:
+        args = parsed_args
     try:
         return run_scheduler(args, parser)
     except KeyboardInterrupt:

@@ -17,6 +17,7 @@ Perilaku default saat ini:
 - sink default adalah Google Sheets, bukan file lokal
 - file lokal hanya dibuat jika `--output` diisi
 - nama grup difilter ke grup Indonesia secara default
+- jika dijalankan tanpa argumen di terminal interaktif, wizard akan muncul untuk memilih platform, keyword/query, target grup, sink sheet, dan scheduler
 - tersedia mode scheduler untuk menjalankan crawler berulang dan terus menambah hasil baru ke sheet
 - provider pencarian yang tersedia: `duckduckgo`, `brave`, `yahoo`, `aol`, `google`
 
@@ -25,9 +26,23 @@ Perilaku default saat ini:
 Jalankan langsung dari source:
 
 ```bash
+python3 crawler_wa.py
 python3 crawler_wa.py --platform whatsapp --keyword-file keywords.whatsapp.txt --max-active-groups 20
 python3 crawler_wa.py --platform telegram --keyword-file keywords.telegram.txt --max-active-groups 20
 ```
+
+Jika kamu menjalankan:
+
+```bash
+python3 crawler_wa.py
+```
+
+maka wizard interaktif akan muncul dan kamu bisa memilih:
+- WhatsApp atau Telegram
+- pakai semua keyword bawaan, keyword sendiri, file keyword, atau query mentah
+- jumlah grup aktif target
+- kirim ke sheet atau simpan file lokal
+- jalan sekali atau scheduler rutin
 
 Atau instal editable lalu pakai command CLI:
 
